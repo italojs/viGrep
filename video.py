@@ -1,6 +1,19 @@
 import re
 import cv2
-import pytesseract 
+import numpy as np
+from frame import Frame
+from multiprocessing import Pool
+from multiprocessing import cpu_count
+
+
+
+def processFrames(params):
+    batchId, batch, callback = params
+    print(batchId)
+    for frame in batch:
+        frame.process()
+        if callback is not None:
+            callback(batchId, frame)
 
 class Video(object):
     def __init__(self, url, regex):
@@ -8,42 +21,57 @@ class Video(object):
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.cts = 0.0
         self.regex = re.compile(regex)
+        self.frames = []
 
-    def __matchRegex(self, frame):
-        text = pytesseract.image_to_string(frame)
-        text = text.replace('\n', '')
-        return text, re.findall(self.regex, text)
-
-    def __getFrameSeconds(self):
+    def __getFrameTime(self):
         ts = self.cap.get(cv2.CAP_PROP_POS_MSEC) #timestamp
         self.cts = self.cts + 1000/self.fps
 
         return abs(ts - self.cts)/1000
     
-    def process(self, callback = None):
-        frames = []
+    def loadFrames(self):
         while(self.cap.isOpened()):
-            done, frame = self.cap.read()
+            done, img = self.cap.read()
             if not done:
                 break
-            text, matches = self.__matchRegex(frame)
-            if len(matches) == 0:
-                continue
 
-            sec = self.__getFrameSeconds()
-            frameId = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+            frame = Frame(
+                img, 
+                float(self.__getFrameTime()),
+                int(self.cap.get(cv2.CAP_PROP_POS_FRAMES)),
+                self.regex
+            )
 
-            data = {"id": int(frameId),
-                "second": sec,
-                "matches": matches,
-                "text": text}
-
-            frames.append(data)
-            yield data
-
+            self.frames.append(frame)
         self.cap.release()
-        if callback:
-            callback(frames)
+    
+    def __divideFramesInBatchs(self, batchsQuantity):
+        batchSize = len(self.frames) / float(batchsQuantity)
+        batchSize = int(np.ceil(batchSize))
+
+        for i in range(0, len(self.frames), batchSize):
+            yield self.frames[i: i + batchSize]
+
+    def process(self, callback = None, pools = 1):
+        if len(self.frames) == 0:
+            self.loadFrames()
+
+        batches = list(self.__divideFramesInBatchs(pools))
+
+        params = []
+        for i, batch in enumerate(batches):
+            params.append((i, batch, callback))
+
+        pool = Pool(processes=pools)
+        pool.map_async(processFrames, params)
+
+        del batches
+        del params
+        del self.frames
+        del self.cap
+
+        pool.close()
+        pool.join()
 
         
 
